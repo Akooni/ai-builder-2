@@ -256,8 +256,17 @@ def order_tables_for_purpose(tables: dict[str, pd.DataFrame], purpose: Purpose) 
         return out
 
     if purpose == Purpose.HIGH_END:
-        for key in ORDER_KEYS:
-            price_desc(key)
+        # Price-desc on *every* tier stacks halo CPU + board + RAM + storage first, which often leaves
+        # no budget for GPU+PSU (e.g. $2000). Mirror gaming: cheap supporting tiers first, strongest GPU first.
+        for key in ("CPUs", "MBs", "RAMs", "Storage"):
+            price_asc(key)
+        g = out["GPUs"]
+        if len(g) > 0 and "price_usd" in g.columns:
+            by = ["price_usd"]
+            if "vram_gb" in g.columns:
+                by.append("vram_gb")
+            out["GPUs"] = g.sort_values(by=by, ascending=[False] * len(by), kind="mergesort").reset_index(drop=True)
+        price_asc("PSUs")
         return out
 
     if purpose == Purpose.CONTENT_CREATION:
@@ -699,9 +708,15 @@ class SearchEngine:
             idxs = [
                 i
                 for i in idxs
-                if float(self.mbs.iloc[i]["price_usd"]) >= 180
+                if float(self.mbs.iloc[i]["price_usd"]) >= 150
                 and not _high_end_value_name(self.mbs.iloc[i].get("name", ""))
             ]
+            if len(idxs) < 4:
+                idxs = [
+                    i
+                    for i in range(len(self.mbs))
+                    if not _high_end_value_name(self.mbs.iloc[i].get("name", ""))
+                ]
         return self._select_candidates("MBs", self.mbs, idxs, purpose)
 
     def _ram_candidates(self, purpose: Purpose) -> list[int]:
