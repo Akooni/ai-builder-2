@@ -1,4 +1,6 @@
 const API_BASE = "";
+/** Client cap so the UI never spins forever if the host stalls (Render, slow networks). */
+const BUILD_FETCH_TIMEOUT_MS = 55_000;
 
 const fetchNoStore = (url, opts = {}) =>
   fetch(url, {
@@ -112,11 +114,14 @@ document.getElementById("build-form").addEventListener("submit", async (e) => {
 
   btn.disabled = true;
   status.textContent = "Searching state space…";
+  const ctrl = new AbortController();
+  const kill = setTimeout(() => ctrl.abort(), BUILD_FETCH_TIMEOUT_MS);
   try {
     const res = await fetchNoStore(`${API_BASE}/api/build`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ budget, purpose, algorithm }),
+      signal: ctrl.signal,
     });
     const data = await res.json();
     if (!res.ok) {
@@ -126,9 +131,16 @@ document.getElementById("build-form").addEventListener("submit", async (e) => {
     status.textContent = data.found ? "Build found." : data.message || "No build found.";
     renderResults(data);
   } catch (err) {
-    status.textContent = "Could not reach the API. Start the backend: uvicorn main:app --reload (from the backend folder).";
+    if (err && err.name === "AbortError") {
+      status.textContent =
+        "Request timed out. Try algorithm A* or BFS, or a simpler purpose. If this is Render, redeploy after the latest backend fix.";
+    } else {
+      status.textContent =
+        "Could not reach the API. Start the backend: uvicorn main:app --reload (from the backend folder).";
+    }
     console.error(err);
   } finally {
+    clearTimeout(kill);
     btn.disabled = false;
   }
 });

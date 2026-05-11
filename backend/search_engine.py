@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import heapq
 import logging
+import os
 import time
 import random
 import re
@@ -478,12 +479,23 @@ def _high_end_value_name(name: object) -> bool:
 
 def _limits(purpose: Purpose) -> dict[str, int]:
     if purpose == Purpose.BUDGET:
-        return LIMITS_BUDGET
-    if purpose == Purpose.HIGH_END:
-        return LIMITS_HIGH_END
-    if purpose == Purpose.GAMING:
-        return LIMITS_GAMING
-    return LIMITS_DEFAULT
+        base = LIMITS_BUDGET
+    elif purpose == Purpose.HIGH_END:
+        base = LIMITS_HIGH_END
+    elif purpose == Purpose.GAMING:
+        base = LIMITS_GAMING
+    else:
+        base = LIMITS_DEFAULT
+    # Render free/small instances are slow; smaller caps + wall-clock cap return a result instead of hanging.
+    if os.environ.get("RENDER", "").lower() != "true":
+        return base
+    return {
+        "candidates": max(6, base["candidates"] // 3),
+        "successors": max(5, base["successors"] // 3),
+        "expansions": max(10_000, base["expansions"] // 8),
+        "visited": max(8_000, base["visited"] // 8),
+        "pops": max(5_000, base["pops"] // 8),
+    }
 
 
 class SearchEngine:
@@ -1148,6 +1160,8 @@ class SearchEngine:
                 else:
                     for nxt in self.expand(cur, purpose, budget):
                         edge_relaxations += 1
+                        if max_seconds is not None and (edge_relaxations & 2047) == 0:
+                            enforce_deadline()
                         if len(visited) >= lim["visited"]:
                             break
                         if nxt not in visited:
@@ -1183,6 +1197,8 @@ class SearchEngine:
                     children = self.expand(cur, purpose, budget)
                     for nxt in reversed(children):
                         edge_relaxations += 1
+                        if max_seconds is not None and (edge_relaxations & 2047) == 0:
+                            enforce_deadline()
                         if len(visited) >= lim["visited"]:
                             break
                         if nxt not in visited:
@@ -1231,6 +1247,8 @@ class SearchEngine:
                     continue
                 for nxt in self.expand(cur, purpose, budget):
                     edge_relaxations += 1
+                    if max_seconds is not None and (edge_relaxations & 2047) == 0:
+                        enforce_deadline()
                     if edge_relaxations > lim["expansions"]:
                         break
                     new_cost = _total_price(nxt, self.tables)
@@ -1291,6 +1309,8 @@ class SearchEngine:
                     continue
                 for nxt in self.expand(cur, purpose, budget):
                     edge_relaxations += 1
+                    if max_seconds is not None and (edge_relaxations & 2047) == 0:
+                        enforce_deadline()
                     if edge_relaxations > lim["expansions"]:
                         break
                     g_next = _total_price(nxt, self.tables)

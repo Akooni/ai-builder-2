@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -19,6 +21,7 @@ from search_engine import (
     SEARCH_ENGINE_FINGERPRINT,
     SEARCH_ENGINE_FILE,
     SearchAlgorithm,
+    SearchTimeoutError,
     normalize_purpose,
     run_search,
 )
@@ -31,13 +34,18 @@ ROOT_DIR = BASE_DIR.parent
 FRONTEND_DIR = ROOT_DIR / "frontend"
 
 _tables = None
+_tables_lock = threading.Lock()
 
 
 def get_tables():
+    """Load dataset once; lock avoids duplicate loads under concurrency."""
     global _tables
-    if _tables is None:
-        _tables = load_components()
-    return _tables
+    if _tables is not None:
+        return _tables
+    with _tables_lock:
+        if _tables is None:
+            _tables = load_components()
+        return _tables
 
 
 class BuildRequest(BaseModel):
@@ -110,8 +118,23 @@ def options():
 _NO_STORE = {"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"}
 
 
+def _build_max_seconds() -> float | None:
+    """Render and similar hosts need a bounded request time; local dev has no cap unless set."""
+    raw = os.environ.get("SEARCH_MAX_SECONDS", "").strip()
+    if raw:
+        try:
+            v = float(raw)
+            return v if v > 0 else None
+        except ValueError:
+            return None
+    if os.environ.get("RENDER", "").lower() == "true":
+        # Stay under common reverse-proxy idle limits; tune with SEARCH_MAX_SECONDS.
+        return 40.0
+    return None
+
+
 @app.post("/api/build")
-def build_pc(body: BuildRequest):
+async def build_pc(body: BuildRequest):
     try:
         purpose = normalize_purpose(body.purpose)
     except ValueError as e:
@@ -121,8 +144,30 @@ def build_pc(body: BuildRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid algorithm: {body.algorithm}") from e
 
-    tables = get_tables()
-    result = run_search(tables, body.budget, purpose.value, alg.value)
+    # First Excel/CSV load can take many seconds on small hosts; never block the event loop.
+    tables = await asyncio.to_thread(get_tables)
+    max_s = _build_max_seconds()
+    try:
+        result = await asyncio.to_thread(
+            run_search,
+            tables,
+            body.budget,
+            purpose.value,
+            alg.value,
+            max_s,
+        )
+    except SearchTimeoutError:
+        return JSONResponse(
+            content={
+                "found": False,
+                "build": None,
+                "message": (
+                    "Search stopped to stay within the host time limit. "
+                    "Try algorithm BFS or A*, or a different purpose/budget."
+                ),
+            },
+            headers=_NO_STORE,
+        )
     if result is None:
         return JSONResponse(
             content={
