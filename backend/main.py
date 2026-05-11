@@ -24,6 +24,7 @@ from search_engine import (
     SearchTimeoutError,
     normalize_purpose,
     run_search,
+    try_random_fallback_build,
 )
 
 # Search progress (node counts, incumbent metrics) logs at INFO for this package.
@@ -128,8 +129,8 @@ def _build_max_seconds() -> float | None:
         except ValueError:
             return None
     if os.environ.get("RENDER", "").lower() == "true":
-        # Stay under common reverse-proxy idle limits; tune with SEARCH_MAX_SECONDS.
-        return 40.0
+        # Tune with SEARCH_MAX_SECONDS; extra randomized fallback runs after if needed.
+        return 88.0
     return None
 
 
@@ -157,13 +158,37 @@ async def build_pc(body: BuildRequest):
             max_s,
         )
     except SearchTimeoutError:
+        fb_secs = 22.0
+        raw_fb = os.environ.get("SEARCH_FALLBACK_SECONDS", "").strip()
+        if raw_fb:
+            try:
+                fb_secs = max(4.0, float(raw_fb))
+            except ValueError:
+                pass
+        result = await asyncio.to_thread(
+            try_random_fallback_build,
+            tables,
+            body.budget,
+            purpose.value,
+            alg.value,
+            fb_secs,
+        )
+        if result is not None:
+            return JSONResponse(
+                content={
+                    "found": True,
+                    "build": _result_to_payload(result, body.budget),
+                    "message": None,
+                },
+                headers=_NO_STORE,
+            )
         return JSONResponse(
             content={
                 "found": False,
                 "build": None,
                 "message": (
-                    "Search stopped to stay within the host time limit. "
-                    "Try algorithm BFS or A*, or a different purpose/budget."
+                    "Search hit the host time limit and no quick randomized build was found. "
+                    "Try a higher budget, purpose “budget” or “office”, or algorithm A*."
                 ),
             },
             headers=_NO_STORE,

@@ -1,6 +1,6 @@
 const API_BASE = "";
-/** Client cap so the UI never spins forever if the host stalls (Render, slow networks). */
-const BUILD_FETCH_TIMEOUT_MS = 55_000;
+/** Client cap: must exceed server graph + fallback time on Render (see backend SEARCH_MAX_SECONDS). */
+const BUILD_FETCH_TIMEOUT_MS = 130_000;
 
 const fetchNoStore = (url, opts = {}) =>
   fetch(url, {

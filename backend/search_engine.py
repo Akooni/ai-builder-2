@@ -1064,7 +1064,8 @@ class SearchEngine:
             return None
         for _ in range(trials):
             if deadline_ts is not None and time.monotonic() > deadline_ts:
-                raise SearchTimeoutError("Search exceeded time limit during fallback sampling.")
+                # Soft stop: do not raise — callers still have graph results or return None.
+                return None
             ci = rng.choice(cpus)
             mbs = [m for m in mball if self._compatible_mb(ci, m)]
             if not mbs:
@@ -1400,4 +1401,41 @@ def run_search(
         budget,
         pur,
         max_seconds=max_seconds,
+    )
+
+
+def try_random_fallback_build(
+    tables: dict[str, pd.DataFrame],
+    budget: float,
+    purpose: str,
+    algorithm: str,
+    sample_seconds: float = 20.0,
+) -> Optional[BuildResult]:
+    """
+    When graph search hits a wall-clock limit, still try randomized feasible assembly
+    for a few seconds (same filters/order as ``run_search``).
+    """
+    pur = normalize_purpose(purpose)
+    alg = SearchAlgorithm(algorithm.lower())
+    stripped, gaming_caps = purpose_prefilter_catalog(tables, pur, budget)
+    filtered = prefilter_tables_by_budget(stripped, budget, 0.6, purpose=pur)
+    ordered = order_tables_for_purpose(filtered, pur)
+    div = int(
+        hashlib.sha256(f"{float(budget):.4f}|{pur.value}|{alg.value}".encode()).hexdigest()[:8],
+        16,
+    )
+    eng = SearchEngine(ordered, diversity_seed=div, gaming_balance_caps=gaming_caps)
+    dl = time.monotonic() + max(4.0, float(sample_seconds))
+    fb = eng._random_feasible_state(pur, budget, trials=5000, deadline_ts=dl)
+    if fb is None:
+        return None
+    return eng.state_to_result(
+        fb,
+        alg,
+        pur,
+        budget,
+        extra_notes=[
+            "Graph search hit the host time limit; this build was found by extra randomized sampling "
+            "over the same filtered candidates."
+        ],
     )
