@@ -9,8 +9,9 @@ Expansion order is strictly CPU → Motherboard → RAM → Storage → GPU → 
 Before search: hard-pruned pools (gaming: ≥8 GB VRAM, CPUs ≥ $150, plus budget-aware CPU/GPU price bands so mid budgets
 do not pair halo CPUs with entry GPUs; high-end: ≥8 GB VRAM and CPUs ≥ $150 only; office: iGPU-only, no dGPU rows),
 then budget caps, then purpose-sorted tables. ``expand`` re-sorts successors by purpose (guided search).
-Demo ``print`` lines (throttled) narrate partial paths and prunes. Budget UCS = cheapest (A*). Office UCS = cheapest.
-All other UCS uses priority (budget − spent) to favor builds that use the budget (best goal by $ then perf score).
+Demo ``print`` lines (throttled) narrate partial paths and prunes. All algorithms collect every complete valid build
+they encounter within limits, then return the one with **maximum total price under the user budget** (tie-break:
+higher internal performance score). UCS/A* still use their usual frontier ordering only to guide exploration.
 """
 
 from __future__ import annotations
@@ -201,6 +202,22 @@ def purpose_prefilter_catalog(
     return out, gaming_caps
 
 
+def budget_prefilter_effective_fraction(purpose: Purpose | None) -> float:
+    """Per-component price cap as a fraction of total budget (see ``prefilter_tables_by_budget``)."""
+    max_fraction = 0.6
+    if purpose == Purpose.GAMING:
+        return min(0.92, max_fraction + 0.32)
+    if purpose is not None and purpose in (Purpose.HIGH_END, Purpose.AI_ML):
+        return min(0.9, max_fraction + 0.28)
+    return max_fraction
+
+
+def per_component_prefilter_cap_usd(budget: float, purpose: Purpose | None) -> float:
+    """Max single-component price kept in the search pool (matches prefilter logic)."""
+    eff = budget_prefilter_effective_fraction(purpose)
+    return round(max(float(budget) * eff, 1.0), 2)
+
+
 def prefilter_tables_by_budget(
     tables: dict[str, pd.DataFrame],
     budget: float,
@@ -213,11 +230,7 @@ def prefilter_tables_by_budget(
     Gaming / high-end / AI-ML use a higher cap so a single GPU can use most of the budget
     (e.g. $1500 gaming builds are not capped at $900 for the GPU row).
     """
-    eff = max_fraction
-    if purpose == Purpose.GAMING:
-        eff = min(0.92, max_fraction + 0.32)
-    elif purpose in (Purpose.HIGH_END, Purpose.AI_ML):
-        eff = min(0.9, max_fraction + 0.28)
+    eff = budget_prefilter_effective_fraction(purpose)
     cap = max(float(budget) * eff, 1.0)
     out: dict[str, pd.DataFrame] = {}
     for name, df in tables.items():
@@ -1077,10 +1090,11 @@ class SearchEngine:
         pall = self._psu_candidates(purpose)
         if not cpus or not mball:
             return None
+        best_st: Optional[State6] = None
+        best_sp = -1.0
         for _ in range(trials):
             if deadline_ts is not None and time.monotonic() > deadline_ts:
-                # Soft stop: do not raise — callers still have graph results or return None.
-                return None
+                return best_st
             ci = rng.choice(cpus)
             mbs = [m for m in mball if self._compatible_mb(ci, m)]
             if not mbs:
@@ -1107,8 +1121,15 @@ class SearchEngine:
             pi = rng.choice(psus)
             st: State6 = (ci, mi, ri, si, gi, pi)
             if _total_price(st, self.tables) <= budget and self.validate_build(st, purpose, budget)[0]:
-                return st
-        return None
+                sp = _total_price(st, self.tables)
+                perf = self._state_performance_total(st)
+                if best_st is None:
+                    best_st, best_sp = st, sp
+                else:
+                    prev = self._state_performance_total(best_st)
+                    if sp > best_sp + 1e-6 or (abs(sp - best_sp) <= 1e-6 and perf > prev):
+                        best_st, best_sp = st, sp
+        return best_st
 
     def search(
         self,
@@ -1148,221 +1169,231 @@ class SearchEngine:
                     f"Search exceeded time limit ({max_seconds:.2f}s) after {elapsed:.2f}s."
                 )
 
-        if algorithm == SearchAlgorithm.BFS:
-            q: deque[State6] = deque([start])
-            visited: set[State6] = {start}
-            pops = 0
-            while q:
-                enforce_deadline()
-                pops += 1
-                if pops > lim["pops"] or len(visited) >= lim["visited"]:
-                    break
-                log_progress("bfs", pops, len(q))
-                cur = q.popleft()
-                if pops % SMARTSEARCH_DEMO_INTERVAL == 0:
-                    print(f"[SmartSearch] Checking node: {self._demo_path_line(cur)} …")
-                if self.is_goal(cur):
-                    ok, _ = self.validate_build(cur, purpose, budget)
-                    if ok:
-                        print(
-                            f"[SmartSearch] Goal found (BFS): {self._demo_path_line(cur, max_parts=6)} "
-                            f"— total ${_total_price(cur, self.tables):.2f}"
-                        )
-                        meta = [
-                            f"BFS: first valid complete build after {pops} deque ops "
-                            "(successors follow purpose-sorted component order)."
-                        ]
-                        return self.state_to_result(cur, algorithm, purpose, budget, extra_notes=meta)
-                else:
+        best_complete: Optional[State6] = None
+        best_spend: float = -1.0
+
+        def note_if_best_complete(state: State6) -> None:
+            """Track the valid complete state with highest total price ≤ budget (tie: performance score)."""
+            nonlocal best_complete, best_spend
+            if not self.is_goal(state):
+                return
+            ok, _ = self.validate_build(state, purpose, budget)
+            if not ok:
+                return
+            spent = _total_price(state, self.tables)
+            perf = self._state_performance_total(state)
+            if best_complete is None:
+                best_complete, best_spend = state, spent
+                print(
+                    f"[SmartSearch] Best complete build so far ({algorithm.value.upper()}): "
+                    f"{self._demo_path_line(state, max_parts=6)} — total ${spent:.2f}"
+                )
+                return
+            prev_perf = self._state_performance_total(best_complete)
+            if spent > best_spend + 1e-6:
+                best_complete, best_spend = state, spent
+                print(
+                    f"[SmartSearch] Best complete build so far ({algorithm.value.upper()}): "
+                    f"{self._demo_path_line(state, max_parts=6)} — total ${spent:.2f}"
+                )
+            elif abs(spent - best_spend) <= 1e-6 and perf > prev_perf:
+                best_complete = state
+
+        graph_search_timed_out = False
+        try:
+            if algorithm == SearchAlgorithm.BFS:
+                q: deque[State6] = deque([start])
+                visited: set[State6] = {start}
+                pops = 0
+                while q:
+                    enforce_deadline()
+                    pops += 1
+                    if pops > lim["pops"] or len(visited) >= lim["visited"]:
+                        break
+                    log_progress("bfs", pops, len(q))
+                    cur = q.popleft()
+                    if pops % SMARTSEARCH_DEMO_INTERVAL == 0:
+                        print(f"[SmartSearch] Checking node: {self._demo_path_line(cur)} …")
+                    if self.is_goal(cur):
+                        note_if_best_complete(cur)
+                    else:
+                        for nxt in self.expand(cur, purpose, budget):
+                            edge_relaxations += 1
+                            if max_seconds is not None and (edge_relaxations & 2047) == 0:
+                                enforce_deadline()
+                            if len(visited) >= lim["visited"]:
+                                break
+                            if nxt not in visited:
+                                visited.add(nxt)
+                                q.append(nxt)
+
+            elif algorithm == SearchAlgorithm.DFS:
+                stack: list[State6] = [start]
+                visited: set[State6] = {start}
+                pops = 0
+                while stack:
+                    enforce_deadline()
+                    pops += 1
+                    if pops > lim["pops"] or len(visited) >= lim["visited"]:
+                        break
+                    log_progress("dfs", pops, len(stack))
+                    cur = stack.pop()
+                    if pops % SMARTSEARCH_DEMO_INTERVAL == 0:
+                        print(f"[SmartSearch] Checking node: {self._demo_path_line(cur)} …")
+                    if self.is_goal(cur):
+                        note_if_best_complete(cur)
+                    else:
+                        children = self.expand(cur, purpose, budget)
+                        for nxt in reversed(children):
+                            edge_relaxations += 1
+                            if max_seconds is not None and (edge_relaxations & 2047) == 0:
+                                enforce_deadline()
+                            if len(visited) >= lim["visited"]:
+                                break
+                            if nxt not in visited:
+                                visited.add(nxt)
+                                stack.append(nxt)
+    
+            elif algorithm == SearchAlgorithm.UCS:
+                counter = 0
+                pops = 0
+                # UCS explores by increasing partial price; we collect every complete goal and keep the max spend ≤ budget.
+                pq_ucs: list[tuple[float, float, int, State6]] = []
+                best_cost: dict[State6, float] = {start: _total_price(start, self.tables)}
+                heapq.heappush(
+                    pq_ucs,
+                    (
+                        best_cost[start],
+                        -self._state_performance_total(start),
+                        counter,
+                        start,
+                    ),
+                )
+                counter += 1
+                while pq_ucs:
+                    enforce_deadline()
+                    pops += 1
+                    if pops > lim["pops"]:
+                        break
+                    log_progress("ucs", pops, len(pq_ucs))
+                    cost, _, _, cur = heapq.heappop(pq_ucs)
+                    if pops % SMARTSEARCH_DEMO_INTERVAL == 0:
+                        print(f"[SmartSearch] UCS evaluating: {self._demo_path_line(cur)} …")
+                    if cost > best_cost.get(cur, float("inf")) + 1e-5:
+                        continue
+                    if self.is_goal(cur):
+                        note_if_best_complete(cur)
+                        continue
                     for nxt in self.expand(cur, purpose, budget):
                         edge_relaxations += 1
                         if max_seconds is not None and (edge_relaxations & 2047) == 0:
                             enforce_deadline()
-                        if len(visited) >= lim["visited"]:
+                        if edge_relaxations > lim["expansions"]:
                             break
-                        if nxt not in visited:
-                            visited.add(nxt)
-                            q.append(nxt)
-
-        elif algorithm == SearchAlgorithm.DFS:
-            stack: list[State6] = [start]
-            visited: set[State6] = {start}
-            pops = 0
-            while stack:
-                enforce_deadline()
-                pops += 1
-                if pops > lim["pops"] or len(visited) >= lim["visited"]:
-                    break
-                log_progress("dfs", pops, len(stack))
-                cur = stack.pop()
-                if pops % SMARTSEARCH_DEMO_INTERVAL == 0:
-                    print(f"[SmartSearch] Checking node: {self._demo_path_line(cur)} …")
-                if self.is_goal(cur):
-                    ok, _ = self.validate_build(cur, purpose, budget)
-                    if ok:
-                        print(
-                            f"[SmartSearch] Goal found (DFS): {self._demo_path_line(cur, max_parts=6)} "
-                            f"— total ${_total_price(cur, self.tables):.2f}"
-                        )
-                        meta = [
-                            f"DFS: first valid complete build after {pops} stack pops "
-                            "(same successor ordering as BFS for this purpose)."
-                        ]
-                        return self.state_to_result(cur, algorithm, purpose, budget, extra_notes=meta)
-                else:
-                    children = self.expand(cur, purpose, budget)
-                    for nxt in reversed(children):
+                        new_cost = _total_price(nxt, self.tables)
+                        if new_cost < best_cost.get(nxt, float("inf")) - 1e-5:
+                            best_cost[nxt] = new_cost
+                            heapq.heappush(
+                                pq_ucs,
+                                (
+                                    new_cost,
+                                    -self._state_performance_total(nxt),
+                                    counter,
+                                    nxt,
+                                ),
+                            )
+                            counter += 1
+                    if edge_relaxations > lim["expansions"]:
+                        break
+    
+            elif algorithm == SearchAlgorithm.ASTAR:
+                counter = 0
+                pops = 0
+                pq: list[tuple[float, float, int, State6]] = []
+                best_cost: dict[State6, float] = {start: 0.0}
+                heapq.heappush(
+                    pq,
+                    (
+                        self._budget_astar_priority(start),
+                        -self._state_performance_total(start),
+                        counter,
+                        start,
+                    ),
+                )
+                counter += 1
+                while pq:
+                    enforce_deadline()
+                    pops += 1
+                    if pops > lim["pops"]:
+                        break
+                    log_progress("astar", pops, len(pq))
+                    f_val, _, _, cur = heapq.heappop(pq)
+                    if pops % SMARTSEARCH_DEMO_INTERVAL == 0:
+                        print(f"[SmartSearch] A* evaluating: {self._demo_path_line(cur)} …")
+                    g_cur = _total_price(cur, self.tables)
+                    if g_cur > best_cost.get(cur, float("inf")) + 1e-5:
+                        continue
+                    if self.is_goal(cur):
+                        note_if_best_complete(cur)
+                        continue
+                    for nxt in self.expand(cur, purpose, budget):
                         edge_relaxations += 1
                         if max_seconds is not None and (edge_relaxations & 2047) == 0:
                             enforce_deadline()
-                        if len(visited) >= lim["visited"]:
+                        if edge_relaxations > lim["expansions"]:
                             break
-                        if nxt not in visited:
-                            visited.add(nxt)
-                            stack.append(nxt)
-
-        elif algorithm == SearchAlgorithm.UCS:
-            counter = 0
-            pops = 0
-            # Match the reference project behavior: UCS always minimizes total path cost.
-            pq_ucs: list[tuple[float, float, int, State6]] = []
-            best_cost: dict[State6, float] = {start: _total_price(start, self.tables)}
-            heapq.heappush(
-                pq_ucs,
-                (
-                    best_cost[start],
-                    -self._state_performance_total(start),
-                    counter,
-                    start,
-                ),
-            )
-            counter += 1
-            while pq_ucs:
-                enforce_deadline()
-                pops += 1
-                if pops > lim["pops"]:
-                    break
-                log_progress("ucs", pops, len(pq_ucs))
-                cost, _, _, cur = heapq.heappop(pq_ucs)
-                if pops % SMARTSEARCH_DEMO_INTERVAL == 0:
-                    print(f"[SmartSearch] UCS evaluating: {self._demo_path_line(cur)} …")
-                if cost > best_cost.get(cur, float("inf")) + 1e-5:
-                    continue
-                if self.is_goal(cur):
-                    ok, _ = self.validate_build(cur, purpose, budget)
-                    if ok:
-                        print(
-                            f"[SmartSearch] Goal found (UCS): {self._demo_path_line(cur, max_parts=6)} "
-                            f"— total ${cost:.2f}"
-                        )
-                        meta = [
-                            f"UCS (Dijkstra on total USD) stopped at first valid goal after {pops} pops, "
-                            f"{edge_relaxations} edge relaxations."
-                        ]
-                        return self.state_to_result(cur, algorithm, purpose, budget, extra_notes=meta)
-                    continue
-                for nxt in self.expand(cur, purpose, budget):
-                    edge_relaxations += 1
-                    if max_seconds is not None and (edge_relaxations & 2047) == 0:
-                        enforce_deadline()
+                        g_next = _total_price(nxt, self.tables)
+                        if g_next < best_cost.get(nxt, float("inf")) - 1e-5:
+                            best_cost[nxt] = g_next
+                            heapq.heappush(
+                                pq,
+                                (
+                                    self._budget_astar_priority(nxt),
+                                    -self._state_performance_total(nxt),
+                                    counter,
+                                    nxt,
+                                ),
+                            )
+                            counter += 1
                     if edge_relaxations > lim["expansions"]:
                         break
-                    new_cost = _total_price(nxt, self.tables)
-                    if new_cost < best_cost.get(nxt, float("inf")) - 1e-5:
-                        best_cost[nxt] = new_cost
-                        heapq.heappush(
-                            pq_ucs,
-                            (
-                                new_cost,
-                                -self._state_performance_total(nxt),
-                                counter,
-                                nxt,
-                            ),
-                        )
-                        counter += 1
-                if edge_relaxations > lim["expansions"]:
-                    break
 
-        elif algorithm == SearchAlgorithm.ASTAR:
-            counter = 0
-            pops = 0
-            pq: list[tuple[float, float, int, State6]] = []
-            best_cost: dict[State6, float] = {start: 0.0}
-            heapq.heappush(
-                pq,
-                (
-                    self._budget_astar_priority(start),
-                    -self._state_performance_total(start),
-                    counter,
-                    start,
-                ),
-            )
-            counter += 1
-            while pq:
-                enforce_deadline()
-                pops += 1
-                if pops > lim["pops"]:
-                    break
-                log_progress("astar", pops, len(pq))
-                f_val, _, _, cur = heapq.heappop(pq)
-                if pops % SMARTSEARCH_DEMO_INTERVAL == 0:
-                    print(f"[SmartSearch] A* evaluating: {self._demo_path_line(cur)} …")
-                g_cur = _total_price(cur, self.tables)
-                if g_cur > best_cost.get(cur, float("inf")) + 1e-5:
-                    continue
-                if self.is_goal(cur):
-                    ok, _ = self.validate_build(cur, purpose, budget)
-                    if ok:
-                        print(
-                            f"[SmartSearch] Goal found (A*): {self._demo_path_line(cur, max_parts=6)} "
-                            f"— total ${g_cur:.2f}"
-                        )
-                        meta = [
-                            f"A* (f=g+h, h=min remaining component costs) found a valid goal after {pops} pops, "
-                            f"{edge_relaxations} edge relaxations."
-                        ]
-                        return self.state_to_result(cur, algorithm, purpose, budget, extra_notes=meta)
-                    continue
-                for nxt in self.expand(cur, purpose, budget):
-                    edge_relaxations += 1
-                    if max_seconds is not None and (edge_relaxations & 2047) == 0:
-                        enforce_deadline()
-                    if edge_relaxations > lim["expansions"]:
-                        break
-                    g_next = _total_price(nxt, self.tables)
-                    if g_next < best_cost.get(nxt, float("inf")) - 1e-5:
-                        best_cost[nxt] = g_next
-                        heapq.heappush(
-                            pq,
-                            (
-                                self._budget_astar_priority(nxt),
-                                -self._state_performance_total(nxt),
-                                counter,
-                                nxt,
-                            ),
-                        )
-                        counter += 1
-                if edge_relaxations > lim["expansions"]:
-                    break
+        except SearchTimeoutError as e:
+            graph_search_timed_out = True
+            logger.info("Graph search stopped at time limit: %s", e)
 
         expansions = edge_relaxations
 
         deadline_ts = None if max_seconds is None else (start_ts + max_seconds)
+        if graph_search_timed_out and max_seconds is not None:
+            deadline_ts = time.monotonic() + min(22.0, max(4.0, 0.2 * max_seconds))
         fb = self._random_feasible_state(purpose, budget, deadline_ts=deadline_ts)
         if fb is not None:
             logger.info(
-                "Graph search hit limits; using randomized feasible assembly for purpose=%s",
+                "Randomized feasible assembly trials for purpose=%s (may improve max spend under cap)",
                 purpose.value,
             )
+            note_if_best_complete(fb)
+
+        if best_complete is not None:
+            spent = _total_price(best_complete, self.tables)
+            meta = [
+                f"{algorithm.value.upper()}: among builds found within search limits, "
+                f"selected maximum total price ${spent:.2f} (≤ ${budget:.2f} budget); "
+                "tie-break favors higher internal performance score. "
+                f"({expansions} edge relaxations explored.)"
+            ]
+            if graph_search_timed_out:
+                meta.append(
+                    "Graph search hit the wall-clock limit before the frontier was fully explored; "
+                    "this is the best complete build collected up to that point (plus any quick random samples)."
+                )
             return self.state_to_result(
-                fb,
+                best_complete,
                 algorithm,
                 purpose,
                 budget,
-                extra_notes=[
-                    f"Search hit caps (~{expansions} edge relaxations); "
-                    "returned a feasible build from randomized trials over the same pre-filtered candidates."
-                ],
+                extra_notes=meta,
             )
 
         logger.warning(

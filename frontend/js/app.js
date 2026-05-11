@@ -51,9 +51,21 @@ function renderResults(data) {
   results.classList.remove("hidden");
   summary.classList.remove("hidden");
 
+  const capPct =
+    b.prefilter_component_price_cap_usd != null && b.request_budget_usd
+      ? Math.round((100 * b.prefilter_component_price_cap_usd) / b.request_budget_usd)
+      : null;
   const cap =
-    b.prefilter_component_price_cap_usd != null
-      ? `<span>Pre-search part cap (60% of budget): <strong>${money(b.prefilter_component_price_cap_usd)}</strong></span>`
+    b.prefilter_component_price_cap_usd != null && capPct != null
+      ? `<span>Pre-search max single-part price (~${capPct}% of budget): <strong>${money(
+          b.prefilter_component_price_cap_usd
+        )}</strong></span>`
+      : "";
+  const budgetHint =
+    b.request_budget_usd != null &&
+    b.total_price != null &&
+    Number(b.total_price) < Number(b.request_budget_usd) * 0.92
+      ? `<div class="budget-hint">Your budget is an <strong>upper limit</strong>. The search returns a compatible build under that amount; it does not try to spend every dollar.</div>`
       : "";
   const util =
     b.budget_utilization != null && b.request_budget_usd != null
@@ -72,6 +84,7 @@ function renderResults(data) {
     ${cap ? "· " + cap : ""}
     ${util ? "· " + util : ""}
     ${eng ? "<br/>" + eng : ""}
+    ${budgetHint}
   `;
 
   const gpuHtml = b.gpu
