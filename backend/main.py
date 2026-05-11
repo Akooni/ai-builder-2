@@ -23,7 +23,6 @@ from search_engine import (
     SearchAlgorithm,
     SearchTimeoutError,
     normalize_purpose,
-    per_component_prefilter_cap_usd,
     run_search,
     try_random_fallback_build,
 )
@@ -78,9 +77,8 @@ def _result_to_payload(res: BuildResult, request_budget: float | None = None) ->
         "notes": res.notes,
     }
     if request_budget is not None and request_budget > 0:
-        pur = normalize_purpose(res.purpose)
         out["request_budget_usd"] = round(request_budget, 2)
-        out["prefilter_component_price_cap_usd"] = per_component_prefilter_cap_usd(request_budget, pur)
+        out["prefilter_component_price_cap_usd"] = round(request_budget * 0.6, 2)
         out["budget_utilization"] = round(100.0 * float(res.total_price) / request_budget, 1)
     out["engine_fingerprint"] = SEARCH_ENGINE_FINGERPRINT
     out["search_engine_file"] = SEARCH_ENGINE_FILE

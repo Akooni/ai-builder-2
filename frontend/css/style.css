@@ -183,13 +183,6 @@ button:disabled {
   color: var(--good);
 }
 
-.summary .budget-hint {
-  margin-top: 0.75rem;
-  font-size: 0.78rem;
-  color: var(--muted);
-  line-height: 1.45;
-}
-
 .empty {
   color: var(--muted);
   line-height: 1.55;

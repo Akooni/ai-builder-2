@@ -19,18 +19,17 @@
           <p class="eyebrow">Artificial Intelligence · State-Space Search</p>
           <h1>AI-Based PC Builder</h1>
           <p class="lede">
-            Explore compatible builds using BFS, DFS, UCS, or A* over a strict component order:
-            CPU → Motherboard → RAM → Storage → GPU → PSU. Among builds found within search limits,
-            the app picks the <strong>highest total price still under your budget</strong> (tie-break: performance score).
+            Explore compatible builds using BFS, DFS, or UCS over a strict component order:
+            CPU → Motherboard → RAM → Storage → GPU → PSU. Constraints and purpose-based pruning
+            mirror real compatibility and workload goals.
           </p>
         </div>
         <div class="hero-card">
           <h2>Algorithms</h2>
           <ul>
-            <li><strong>BFS</strong> — breadth-first exploration</li>
-            <li><strong>DFS</strong> — depth-first exploration</li>
-            <li><strong>UCS</strong> — uniform-cost frontier (explores cheap prefixes first)</li>
-            <li><strong>A*</strong> — cost + heuristic ordering</li>
+            <li><strong>BFS</strong> — shallow partial builds first</li>
+            <li><strong>DFS</strong> — depth-first assembly</li>
+            <li><strong>UCS</strong> — cheapest total price first</li>
           </ul>
         </div>
       </header>
@@ -73,6 +72,6 @@
         <span>API: <code>/api/build</code> · Docs: <code>/docs</code></span>
       </footer>
     </div>
-    <script src="/ui/js/app.js?v=20260511d"></script>
+    <script src="/ui/js/app.js?v=20260511c"></script>
   </body>
 </html>
