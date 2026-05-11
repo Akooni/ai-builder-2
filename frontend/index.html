@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI PC Builder</title>
+    <link rel="stylesheet" href="/ui/css/style.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="page">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Artificial Intelligence · State-Space Search</p>
+          <h1>AI-Based PC Builder</h1>
+          <p class="lede">
+            Explore compatible builds using BFS, DFS, or UCS over a strict component order:
+            CPU → Motherboard → RAM → Storage → GPU → PSU. Constraints and purpose-based pruning
+            mirror real compatibility and workload goals.
+          </p>
+        </div>
+        <div class="hero-card">
+          <h2>Algorithms</h2>
+          <ul>
+            <li><strong>BFS</strong> — shallow partial builds first</li>
+            <li><strong>DFS</strong> — depth-first assembly</li>
+            <li><strong>UCS</strong> — cheapest total price first</li>
+          </ul>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="panel form-panel">
+          <h2>Build request</h2>
+          <form id="build-form">
+            <label>
+              Budget (USD)
+              <input type="number" id="budget" name="budget" min="200" step="50" value="1500" required />
+            </label>
+            <label>
+              Purpose
+              <select id="purpose" name="purpose"></select>
+            </label>
+            <label>
+              Search algorithm
+              <select id="algorithm" name="algorithm"></select>
+            </label>
+            <button type="submit" id="submit-btn">Find build</button>
+          </form>
+          <p id="status" class="status" role="status"></p>
+        </section>
+
+        <section class="panel results-panel">
+          <div class="results-header">
+            <h2>Recommended build</h2>
+            <div id="summary" class="summary hidden"></div>
+          </div>
+          <div id="empty" class="empty">
+            Submit the form to run the search engine and render a compatible configuration.
+          </div>
+          <div id="results" class="results hidden"></div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <span>Dataset: <code>PC_Components_Dataset_small.xlsx</code></span>
+        <span>API: <code>/api/build</code> · Docs: <code>/docs</code></span>
+      </footer>
+    </div>
+    <script src="/ui/js/app.js?v=20260511"></script>
+  </body>
+</html>
